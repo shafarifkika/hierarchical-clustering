@@ -1,0 +1,188 @@
+"""
+Agglomerative Hierarchical Clustering (implementasi sendiri)
+Linkage: single, complete, average, ward
+Hasil dibandingkan dengan scipy untuk validasi.
+
+Cara pakai:
+1. Siapkan data.csv (kolom pertama = nama objek, kolom lain = fitur angka)
+2. Atur bagian PENGATURAN di bawah
+3. Jalankan: python hierarchical_clustering.py
+"""
+
+import csv
+import math
+import sys
+
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.cluster.hierarchy import linkage as scipy_linkage, dendrogram, fcluster
+from scipy.spatial.distance import pdist
+
+# ======================= PENGATURAN (ubah di sini) =======================
+DATA_FILE = "data_uji.csv"      # nama file data
+METRIC = "manhattan"        # "euclidean" atau "manhattan"
+METHODS = ["single", "complete", "average", "ward"]  # linkage yang dijalankan
+NORMALIZE = False           # True = standarisasi z-score tiap fitur
+N_CLUSTERS = 3              # jumlah kelompok untuk "memotong" dendrogram (None = lewati)
+SHOW_TABLE = True           # False = tidak cetak tabel di terminal, hanya tampilkan dendrogram
+# =========================================================================
+
+
+def read_csv(path):
+    """Baca CSV: kolom pertama nama objek, sisanya fitur numerik."""
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        text = f.read()
+    # deteksi pemisah otomatis (koma, titik koma, atau tab)
+    delimiter = csv.Sniffer().sniff(text.splitlines()[0], delimiters=",;\t").delimiter
+    rows = list(csv.reader(text.splitlines(), delimiter=delimiter))
+    header, body = rows[0], [r for r in rows[1:] if r]
+    names = [r[0] for r in body]
+    X = np.array([[float(v.replace(",", ".")) for v in r[1:]] for r in body])
+    return names, header[1:], X
+
+
+def zscore(X):
+    """Standarisasi: (x - rata-rata) / simpangan baku, per kolom."""
+    std = X.std(axis=0)
+    std[std == 0] = 1  # hindari pembagian dengan nol
+    return (X - X.mean(axis=0)) / std
+
+
+def distance_matrix(X, metric):
+    """Matriks jarak antar semua pasangan objek."""
+    n = len(X)
+    D = np.zeros((n, n))
+    for i in range(n):
+        for j in range(i + 1, n):
+            diff = X[i] - X[j]
+            if metric == "euclidean":
+                d = math.sqrt(np.sum(diff ** 2))
+            elif metric == "manhattan":
+                d = np.sum(np.abs(diff))
+            else:
+                raise ValueError("METRIC harus 'euclidean' atau 'manhattan'")
+            D[i, j] = D[j, i] = d
+    return D
+
+
+def pair(a, b):
+    """Kunci pasangan kelompok (urutan tidak berpengaruh)."""
+    return (a, b) if a < b else (b, a)
+
+
+def agglomerative(D, method):
+    """
+    Inti algoritma (bottom-up).
+    Mengembalikan linkage matrix Z (format sama dengan scipy):
+    tiap baris = [id kelompok 1, id kelompok 2, jarak gabung, ukuran kelompok baru]
+    Kelompok awal punya id 0..n-1, kelompok hasil gabungan diberi id n, n+1, ...
+    """
+    n = len(D)
+    sizes = {i: 1 for i in range(n)}  # kelompok aktif -> jumlah anggota
+    dist = {(i, j): D[i, j] for i in range(n) for j in range(i + 1, n)}
+    Z = []
+    next_id = n
+
+    while len(sizes) > 1:
+        # 1. cari dua kelompok dengan jarak terkecil
+        (a, b), h = min(dist.items(), key=lambda kv: kv[1])
+        na, nb = sizes[a], sizes[b]
+        new = next_id
+        next_id += 1
+
+        # 2. hitung jarak kelompok baru ke semua kelompok lain (rumus linkage)
+        for k in sizes:
+            if k in (a, b):
+                continue
+            dak, dbk, nk = dist[pair(a, k)], dist[pair(b, k)], sizes[k]
+            if method == "single":        # jarak terkecil antar anggota
+                dn = min(dak, dbk)
+            elif method == "complete":    # jarak terbesar antar anggota
+                dn = max(dak, dbk)
+            elif method == "average":     # rata-rata semua pasangan (UPGMA)
+                dn = (na * dak + nb * dbk) / (na + nb)
+            elif method == "ward":        # menambah variansi sekecil mungkin
+                dn = math.sqrt(((na + nk) * dak ** 2 + (nb + nk) * dbk ** 2
+                                - nk * h ** 2) / (na + nb + nk))
+            else:
+                raise ValueError(f"Linkage tidak dikenal: {method}")
+            dist[pair(k, new)] = dn
+
+        # 3. buang kelompok lama, catat penggabungan
+        for k in list(sizes):
+            dist.pop(pair(a, k), None)
+            dist.pop(pair(b, k), None)
+        del sizes[a], sizes[b]
+        sizes[new] = na + nb
+        Z.append([a, b, h, na + nb])
+
+    return np.array(Z)
+
+
+def print_merges(Z, names):
+    """Cetak riwayat penggabungan dalam bentuk tabel."""
+    n = len(names)
+
+    def label(i):
+        return names[int(i)] if i < n else f"K{int(i) - n + 1}"
+
+    print(f"{'Langkah':<8}{'Gabung':<20}{'Jarak':>10}{'Ukuran':>8}")
+    for step, (a, b, h, size) in enumerate(Z, start=1):
+        print(f"{step:<8}{label(a) + ' + ' + label(b):<20}{h:>10.4f}{int(size):>8}")
+
+
+def main():
+    names, features, X = read_csv(DATA_FILE)
+    print(f"Data: {len(names)} objek, {len(features)} fitur ({', '.join(features)})")
+    if NORMALIZE:
+        X = zscore(X)
+        print("Data distandarisasi (z-score).")
+    print(f"Ukuran jarak: {METRIC}\n")
+
+    D = distance_matrix(X, METRIC)
+    scipy_metric = "euclidean" if METRIC == "euclidean" else "cityblock"
+
+    fig, axes = plt.subplots(1, len(METHODS), figsize=(5 * len(METHODS), 4.5),
+                             squeeze=False)
+
+    for ax, method in zip(axes[0], METHODS):
+        if method == "ward" and METRIC != "euclidean":
+            print(f"[{method}] dilewati: ward hanya cocok dengan euclidean.\n")
+            ax.set_visible(False)
+            continue
+
+        Z = agglomerative(D, method)
+
+        if SHOW_TABLE:
+            print(f"=== {method.upper()} LINKAGE ===")
+            print_merges(Z, names)
+
+            # validasi: bandingkan jarak penggabungan dengan scipy
+            Z_ref = scipy_linkage(pdist(X, scipy_metric), method=method)
+            cocok = np.allclose(np.sort(Z[:, 2]), np.sort(Z_ref[:, 2]))
+            print(f"Validasi dengan scipy: {'SAMA' if cocok else 'BEDA'}")
+
+            # potong dendrogram jadi N_CLUSTERS kelompok
+            if N_CLUSTERS:
+                labels = fcluster(Z, t=N_CLUSTERS, criterion="maxclust")
+                print(f"Pembagian {N_CLUSTERS} kelompok:")
+                for c in sorted(set(labels)):
+                    anggota = [names[i] for i in range(len(names)) if labels[i] == c]
+                    print(f"  Kelompok {c}: {', '.join(anggota)}")
+            print()
+
+        dendrogram(Z, labels=names, ax=ax)
+        ax.set_title(f"{method} linkage")
+        ax.set_ylabel("Jarak")
+
+    plt.tight_layout()
+    plt.savefig("dendrogram.png", dpi=150)
+    print("Dendrogram disimpan ke dendrogram.png")
+    plt.show()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except FileNotFoundError:
+        sys.exit(f"File '{DATA_FILE}' tidak ditemukan. Taruh di folder yang sama dengan script ini.")
